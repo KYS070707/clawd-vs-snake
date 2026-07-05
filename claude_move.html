@@ -45,6 +45,32 @@
   #overlay small { color: #AAA; font-size: 12px; line-height: 1.6; }
   #overlay .result { color: #FFF; font-size: 22px; }
   #overlay.hidden { display: none; }
+  /* ── 게임오버: 리더보드 / 이름 입력 / 재시작 ── */
+  #ovLb { display: none; width: 100%; max-width: 300px; }
+  #ovLb .lbTitle { color: #E0A886; font-size: 13px; margin-bottom: 6px; letter-spacing: 1px; }
+  #ovLb .lbRow {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; margin-bottom: 3px; font-size: 13px;
+    background: rgba(255,255,255,0.06); border-radius: 6px;
+  }
+  #ovLb .lbRow.hl { background: rgba(217,119,87,0.30); outline: 1px solid #D97757; }
+  #ovLb .lbRank { width: 34px; text-align: left; color: #EEE; }
+  #ovLb .lbName { flex: 1; text-align: left; color: #EEE;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #ovLb .lbTime { color: #8FBC8F; font-weight: 700; }
+  #ovLb .lbEmpty { color: #888; font-size: 12px; padding: 8px; }
+  #ovForm { display: none; gap: 6px; align-items: center; }
+  #ovName {
+    padding: 8px 10px; font-size: 14px; width: 150px; text-align: center;
+    border-radius: 6px; border: 2px solid #D97757;
+    background: #1E1E1E; color: #fff; outline: none;
+  }
+  #ovSave, #ovRestart {
+    border: none; border-radius: 8px; font-weight: 700; cursor: pointer;
+    font-size: 14px; padding: 8px 16px; background: #D97757; color: #1E1E1E;
+  }
+  #ovSave:disabled { opacity: 0.5; }
+  #ovRestart { display: none; background: #333; color: #F0A886; }
   .dpad {
     margin-top: 14px;
     display: grid;
@@ -73,9 +99,15 @@
   <canvas id="game" width="600" height="400" tabindex="0"></canvas>
   <div id="overlay">
     <div id="ovTitle">▶ 탭해서 시작</div>
-    <small>뱀을 피해 최대한 오래 생존하세요!<br>
+    <small id="ovDesc">뱀을 피해 최대한 오래 생존하세요!<br>
     10초마다 과일이 생기고, 뱀이 먹으면 1.5배 길어집니다.<br>
     이동: 방향키 · 버튼</small>
+    <div id="ovLb"></div>
+    <div id="ovForm">
+      <input id="ovName" type="text" placeholder="이름 (최대 10자)" maxlength="10">
+      <button id="ovSave">저장</button>
+    </div>
+    <button id="ovRestart">▶ 다시 시작</button>
   </div>
 </div>
 
@@ -90,6 +122,12 @@
 const canvas = document.getElementById('game');
 const overlay = document.getElementById('overlay');
 const ovTitle = document.getElementById('ovTitle');
+const ovDesc = document.getElementById('ovDesc');
+const ovLb = document.getElementById('ovLb');
+const ovForm = document.getElementById('ovForm');
+const ovName = document.getElementById('ovName');
+const ovSave = document.getElementById('ovSave');
+const ovRestart = document.getElementById('ovRestart');
 const timeEl = document.getElementById('time');
 const bestEl = document.getElementById('best');
 const ctx = canvas.getContext('2d');
@@ -341,32 +379,129 @@ function loop(t) {
 }
 requestAnimationFrame(loop);
 
-function gameOver() {
+let lastRec = 0;
+
+async function gameOver() {
   state = 'over';
-  const rec = elapsed.toFixed(1);
-  if (bestTime === null || elapsed > bestTime) {
-    bestTime = elapsed;
+  overlayMode = 'over';
+  const rec = elapsed;
+  lastRec = rec;
+  if (bestTime === null || rec > bestTime) {
+    bestTime = rec;
     bestEl.textContent = bestTime.toFixed(1) + '초';
   }
+  // 오버레이를 게임오버 화면으로 구성
+  ovDesc.style.display = 'none';
   ovTitle.innerHTML =
     '<div class="result">💥 게임 오버!</div>' +
-    '<div style="margin-top:6px">생존 기록: ' + rec + '초</div>' +
-    '<div style="margin-top:10px;font-size:15px">▶ 탭해서 다시 시작</div>';
+    '<div style="margin-top:4px;font-size:15px">생존 기록: ' + rec.toFixed(1) + '초</div>';
+  ovForm.style.display = 'none';
+  ovLb.style.display = 'block';
+  ovLb.innerHTML = '<div class="lbEmpty">기록 불러오는 중…</div>';
+  ovRestart.style.display = 'inline-block';
   overlay.classList.remove('hidden');
+
+  const lb = await getLB();
+  const full = lb.length >= 5;
+  const qualifies = !full || rec > Number(lb[lb.length - 1].time);
+  renderLB(lb, null);
+  if (qualifies) {
+    ovForm.style.display = 'flex';
+    ovSave.disabled = false;
+    ovName.value = '';
+    setTimeout(() => ovName.focus(), 120);   // 이름 입력창에 포커스(키보드 노출)
+  }
 }
 
+// ---------- Supabase 랭킹(생존 시간 TOP 5, 길수록 상위) ----------
+const SUPABASE_URL  = 'https://vercrjcxlwwruxsydfqq.supabase.co';
+const SUPABASE_ANON = 'sb_publishable_lxkMgdYFfBs-LII-GLiQpQ_UWQWZa0Z';
+const SCORES_API = `${SUPABASE_URL}/rest/v1/clawd_scores`;
+const SB_HEADERS = {
+  apikey: SUPABASE_ANON,
+  Authorization: `Bearer ${SUPABASE_ANON}`,
+  'Content-Type': 'application/json'
+};
+const MEDALS = ['🥇','🥈','🥉','4위','5위'];
+
+async function getLB() {
+  try {
+    const res = await fetch(
+      `${SCORES_API}?select=name,time,created_at&order=time.desc&limit=5`,
+      { headers: SB_HEADERS });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch { return []; }
+}
+async function saveScore(name, time) {
+  const res = await fetch(SCORES_API, {
+    method: 'POST',
+    headers: { ...SB_HEADERS, Prefer: 'return=minimal' },
+    body: JSON.stringify({ name, time })
+  });
+  if (!res.ok) throw new Error('save failed: ' + res.status);
+}
+function escHtml(s) {
+  return s.replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+}
+function renderLB(lb, hlTime) {
+  if (!lb.length) {
+    ovLb.innerHTML = '<div class="lbEmpty">아직 기록이 없습니다.</div>';
+    return;
+  }
+  ovLb.innerHTML =
+    '<div class="lbTitle">🏆 TOP 5 생존 기록</div>' +
+    lb.map((e, i) => {
+      const hl = hlTime !== null && Math.abs(Number(e.time) - hlTime) < 0.05;
+      return `<div class="lbRow${hl ? ' hl' : ''}">
+        <span class="lbRank">${MEDALS[i]}</span>
+        <span class="lbName">${escHtml(String(e.name))}</span>
+        <span class="lbTime">${Number(e.time).toFixed(1)}초</span>
+      </div>`;
+    }).join('');
+}
+
+async function doSaveScore() {
+  const name = (ovName.value.trim() || '익명').slice(0, 10);
+  ovSave.disabled = true;
+  try {
+    await saveScore(name, Number(lastRec.toFixed(1)));
+    ovForm.style.display = 'none';
+    renderLB(await getLB(), lastRec);
+  } catch (err) {
+    ovSave.disabled = false;
+    alert('기록 저장에 실패했습니다. 네트워크 상태를 확인하고 다시 시도해 주세요.');
+  }
+}
+ovSave.addEventListener('click', doSaveScore);
+ovName.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doSaveScore(); } });
+ovRestart.addEventListener('click', e => { e.stopPropagation(); startPlay(); });
+
 // ---------- 시작/재시작 & 포커스 ----------
+let overlayMode = 'ready';   // ready(첫 시작 화면) | over(게임오버 화면)
+
 function grabFocus() {
+  if (state === 'over') return;   // 게임오버(이름 입력) 중엔 입력창 포커스를 뺏지 않음
   window.focus();
   canvas.focus({ preventScroll: true });
 }
-overlay.addEventListener('pointerdown', e => {
-  e.preventDefault();
+function startPlay() {
   overlay.classList.add('hidden');
+  ovDesc.style.display = '';
+  ovLb.style.display = 'none';
+  ovForm.style.display = 'none';
+  ovRestart.style.display = 'none';
+  pressed.up = pressed.down = pressed.left = pressed.right = false;
   resetGame();
   lastFrame = null;   // dt 기준점 초기화
   state = 'playing';
   grabFocus();
+}
+overlay.addEventListener('pointerdown', e => {
+  if (overlayMode !== 'ready') return;   // 게임오버 화면에선 '다시 시작' 버튼으로만 재시작
+  e.preventDefault();
+  overlayMode = 'over';                   // 이후부터는 게임오버 화면 규칙 적용
+  startPlay();
 });
 document.addEventListener('pointerdown', grabFocus);
 window.addEventListener('blur', () => setTimeout(grabFocus, 50));
