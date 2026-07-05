@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Clawd vs Snake</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1E1E1E;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 16px;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  h1 { font-size: 16px; color: #D97757; margin-bottom: 6px; }
+  #hud {
+    color: #EEE; font-size: 14px; margin-bottom: 8px;
+    display: flex; gap: 18px;
+  }
+  #hud .best { color: #8FBC8F; }
+  .stage { position: relative; max-width: 100%; }
+  canvas {
+    display: block;
+    background: #262624;
+    border: 2px solid #D97757;
+    border-radius: 10px;
+    max-width: 100%;
+    outline: none;
+    touch-action: none;
+  }
+  #overlay {
+    position: absolute; inset: 0;
+    background: rgba(30,30,30,0.86);
+    border-radius: 10px;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px;
+    color: #D97757; font-size: 18px; cursor: pointer;
+    text-align: center; padding: 12px;
+  }
+  #overlay small { color: #AAA; font-size: 12px; line-height: 1.6; }
+  #overlay .result { color: #FFF; font-size: 22px; }
+  #overlay.hidden { display: none; }
+  .dpad {
+    margin-top: 14px;
+    display: grid;
+    grid-template-columns: 60px 60px 60px;
+    grid-template-rows: 60px 60px;
+    gap: 6px;
+  }
+  .dpad button {
+    font-size: 22px; border: none; border-radius: 12px;
+    background: #D97757; color: #1E1E1E; touch-action: none;
+  }
+  .dpad button:active { background: #F0A886; }
+  #up   { grid-column: 2; grid-row: 1; }
+  #left { grid-column: 1; grid-row: 2; }
+  #down { grid-column: 2; grid-row: 2; }
+  #right{ grid-column: 3; grid-row: 2; }
+</style>
+</head>
+<body>
+<h1>* Clawd vs Snake</h1>
+<div id="hud">
+  <span>생존: <b id="time">0.0</b>초</span>
+  <span class="best">최고 기록: <b id="best">-</b></span>
+</div>
+<div class="stage">
+  <canvas id="game" width="600" height="400" tabindex="0"></canvas>
+  <div id="overlay">
+    <div id="ovTitle">▶ 탭해서 시작</div>
+    <small>뱀을 피해 최대한 오래 생존하세요!<br>
+    10초마다 과일이 생기고, 뱀이 먹으면 1.5배 길어집니다.<br>
+    이동: 방향키 · 버튼</small>
+  </div>
+</div>
+
+<div class="dpad">
+  <button id="up">▲</button>
+  <button id="left">◀</button>
+  <button id="down">▼</button>
+  <button id="right">▶</button>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const overlay = document.getElementById('overlay');
+const ovTitle = document.getElementById('ovTitle');
+const timeEl = document.getElementById('time');
+const bestEl = document.getElementById('best');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const ORANGE = '#D97757';
+const BLACK  = '#1E1E1E';
+const GREEN  = '#7CB342';
+const GREEN_D = '#558B2F';
+
+// ---------- Clawd 픽셀 맵 ----------
+const BODY = [
+  [0,0,1,1,1,1,1,1,1,1,0,0],
+  [0,1,1,1,1,1,1,1,1,1,1,0],
+  [1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,1,2,2,1,1,1,1,2,2,1,1],
+  [1,1,2,2,1,1,1,1,2,2,1,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1],
+];
+const LEGS_A = [
+  [0,1,0,0,1,0,0,1,0,0,1,0],
+  [0,1,0,0,0,0,0,0,0,0,1,0],
+];
+const LEGS_B = [
+  [0,1,0,0,1,0,0,1,0,0,1,0],
+  [0,0,0,0,1,0,0,1,0,0,0,0],
+];
+const PX = 5;
+const CW = 12 * PX, CH = 9 * PX;
+
+// ---------- 게임 상태 ----------
+const CLAWD_SPEED = 240;   // px/초 (주사율 무관)
+const SEG_SIZE = 24;        // 뱀 마디 크기
+const SEG_SPACING = 20;     // 마디 간격
+const FRUITS = ['🍎', '🍌', '🍍', '🍇', '🍑', '🍉'];
+
+let state = 'ready';        // ready | playing | over
+let x, y;
+let snake;                  // { segs:[{x,y}], dir:{dx,dy}, speed, len, path:[] }
+let fruits;                 // [{x,y,emoji}]
+let startTime, elapsed, lastFruitTime, lastTurnTime;
+let bestTime = null;
+const pressed = { up:false, down:false, left:false, right:false };
+
+function resetGame() {
+  x = W * 0.25; y = H / 2;
+  const sx = W * 0.75, sy = H / 2;
+  snake = {
+    dir: { dx: -1, dy: 0 },   // 직선(축 방향)으로만 이동
+    speed: 132,             // px/초 (주사율 무관)
+    len: 6,
+    pendingGrowth: 0,         // 점진 성장 대기량
+    lastGrowTime: 0,
+    path: [{ x: sx, y: sy }],
+    head: { x: sx, y: sy },
+  };
+  fruits = [];
+  elapsed = 0;
+  startTime = performance.now();
+  lastFruitTime = startTime;
+  lastTurnTime = startTime;
+}
+
+// ---------- 그리기 ----------
+function drawGrid(grid, ox, oy, blink) {
+  for (let r = 0; r < grid.length; r++)
+    for (let c = 0; c < grid[r].length; c++) {
+      const v = grid[r][c];
+      if (!v) continue;
+      ctx.fillStyle = (v === 2) ? (blink ? ORANGE : BLACK) : ORANGE;
+      ctx.fillRect(ox + c * PX, oy + r * PX, PX, PX);
+    }
+}
+
+function drawClawd(cx, cy, t, moving) {
+  const ox = cx - CW / 2;
+  const bob = moving ? 0 : Math.sin(t / 400) * 2;
+  const oy = cy - CH / 2 + bob;
+  const blink = (t % 3200) < 150;
+  const legs = moving && ((t / 120) | 0) % 2 === 0 ? LEGS_B : LEGS_A;
+  drawGrid(BODY, ox, oy, blink);
+  drawGrid(legs, ox, oy + BODY.length * PX, false);
+}
+
+function snakeSegments() {
+  // path(머리 이동 궤적)를 따라 일정 간격으로 마디 배치 → 직선 궤적 그대로 따라옴
+  const segs = [{ ...snake.head }];
+  let need = SEG_SPACING;
+  let prev = snake.head;
+  for (let i = snake.path.length - 1; i >= 0 && segs.length < snake.len; i--) {
+    const p = snake.path[i];
+    let d = Math.hypot(p.x - prev.x, p.y - prev.y);
+    while (d >= need && segs.length < snake.len) {
+      const t = need / d;
+      const nx = prev.x + (p.x - prev.x) * t;
+      const ny = prev.y + (p.y - prev.y) * t;
+      segs.push({ x: nx, y: ny });
+      prev = { x: nx, y: ny };
+      d = Math.hypot(p.x - prev.x, p.y - prev.y);
+      need = SEG_SPACING;
+    }
+    need -= d;
+    prev = p;
+  }
+  return segs;
+}
+
+function drawSnake(t) {
+  const segs = snakeSegments();
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const s = segs[i];
+    ctx.fillStyle = (i % 2 === 0) ? GREEN : GREEN_D;
+    ctx.fillRect(s.x - SEG_SIZE/2, s.y - SEG_SIZE/2, SEG_SIZE, SEG_SIZE);
+  }
+  // 머리 눈
+  const h = segs[0];
+  ctx.fillStyle = BLACK;
+  ctx.fillRect(h.x - 8, h.y - 8, 6, 6);
+  ctx.fillRect(h.x + 2, h.y - 8, 6, 6);
+  return segs;
+}
+
+function drawFruits() {
+  ctx.font = '40px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const f of fruits) ctx.fillText(f.emoji, f.x, f.y);
+}
+
+// ---------- 뱀 AI: 직선 이동 + 주기적 90도 방향 전환 ----------
+function turnSnake(now) {
+  // 목표: 과일이 있으면 가까운 과일, 없으면 Clawd
+  let tx = x, ty = y;
+  if (fruits.length) {
+    let best = null, bd = 1e9;
+    for (const f of fruits) {
+      const d = Math.hypot(f.x - snake.head.x, f.y - snake.head.y);
+      if (d < bd) { bd = d; best = f; }
+    }
+    // 과일과 Clawd 중 더 가까운 쪽을 노림
+    if (bd < Math.hypot(x - snake.head.x, y - snake.head.y)) { tx = best.x; ty = best.y; }
+  }
+  const dx = tx - snake.head.x, dy = ty - snake.head.y;
+  // 정밀 조준: 한 축이 거의 맞으면 다른 축으로 직진해 정확히 명중
+  const ALIGN = 10;
+  let nd;
+  if (Math.abs(dx) < ALIGN)      nd = { dx: 0, dy: Math.sign(dy) || 1 };
+  else if (Math.abs(dy) < ALIGN) nd = { dx: Math.sign(dx) || 1, dy: 0 };
+  else if (Math.abs(dx) > Math.abs(dy)) nd = { dx: Math.sign(dx) || 1, dy: 0 };
+  else nd = { dx: 0, dy: Math.sign(dy) || 1 };
+  if (nd.dx === -snake.dir.dx && nd.dy === -snake.dir.dy) {
+    nd = Math.abs(dx) > Math.abs(dy)
+      ? { dx: 0, dy: Math.sign(dy) || 1 }
+      : { dx: Math.sign(dx) || 1, dy: 0 };
+  }
+  if (nd.dx !== snake.dir.dx || nd.dy !== snake.dir.dy) {
+    snake.dir = nd;
+    snake.path.push({ ...snake.head });   // 꺾인 지점 기록
+    if (snake.path.length > 400) snake.path.shift();
+  }
+  lastTurnTime = now;
+}
+
+function updateSnake(now, dt) {
+  if (now - lastTurnTime > 320) turnSnake(now);
+
+  // 점진 성장: 180ms마다 꼬리 쪽으로 한 마디씩 (몸통이 갑자기 나타나지 않음)
+  if (snake.pendingGrowth > 0 && now - snake.lastGrowTime > 180) {
+    snake.len += 1;
+    snake.pendingGrowth -= 1;
+    snake.lastGrowTime = now;
+  }
+
+  snake.head.x += snake.dir.dx * snake.speed * dt;
+  snake.head.y += snake.dir.dy * snake.speed * dt;
+
+  // 벽에 닿으면 즉시 방향 전환
+  const m = SEG_SIZE;
+  if (snake.head.x < m || snake.head.x > W - m ||
+      snake.head.y < m || snake.head.y > H - m) {
+    snake.head.x = Math.max(m, Math.min(W - m, snake.head.x));
+    snake.head.y = Math.max(m, Math.min(H - m, snake.head.y));
+    turnSnake(now);
+  }
+}
+
+// ---------- 메인 루프 ----------
+let lastFrame = null;
+function loop(t) {
+  const now = performance.now();
+  // delta-time: 프레임 간 경과 시간(초). 주사율(60/120/144Hz)과 무관하게 동일 속도 보장
+  let dt = lastFrame === null ? 0 : (now - lastFrame) / 1000;
+  lastFrame = now;
+  if (dt > 0.05) dt = 0.05;   // 탭 전환 등으로 인한 순간이동 방지
+
+  if (state === 'playing') {
+    // Clawd 이동
+    const moving = pressed.up || pressed.down || pressed.left || pressed.right;
+    const step = CLAWD_SPEED * dt;
+    if (pressed.left)  x -= step;
+    if (pressed.right) x += step;
+    if (pressed.up)    y -= step;
+    if (pressed.down)  y += step;
+    x = Math.max(CW/2, Math.min(W - CW/2, x));
+    y = Math.max(CH/2, Math.min(H - CH/2, y));
+
+    // 10초마다 과일 생성
+    if (now - lastFruitTime >= 10000) {
+      fruits.push({
+        x: 40 + Math.random() * (W - 80),
+        y: 40 + Math.random() * (H - 80),
+        emoji: FRUITS[(Math.random() * FRUITS.length) | 0],
+      });
+      lastFruitTime = now;
+    }
+
+    updateSnake(now, dt);
+
+    // 뱀이 과일을 먹으면 길이 1.5배
+    for (let i = fruits.length - 1; i >= 0; i--) {
+      if (Math.hypot(fruits[i].x - snake.head.x, fruits[i].y - snake.head.y) < SEG_SIZE + 14) {
+        fruits.splice(i, 1);
+        // 총량은 1.5배지만, 꼬리에서 한 마디씩 자연스럽게 자라남
+        snake.pendingGrowth += Math.ceil(snake.len * 1.5) - snake.len;
+      }
+    }
+
+    elapsed = (now - startTime) / 1000;
+    timeEl.textContent = elapsed.toFixed(1);
+
+    // 그리기 + 충돌 판정
+    ctx.clearRect(0, 0, W, H);
+    drawFruits();
+    const segs = drawSnake(t);
+    drawClawd(x, y, t, moving);
+
+    // 실제 보이는 그림 기준의 사각형 충돌 (약간 관대하게 축소)
+    const cHW = (CW / 2) * 0.8, cHH = (CH / 2) * 0.8;   // Clawd 히트박스
+    const sH  = (SEG_SIZE / 2) * 0.85;                   // 뱀 마디 히트박스
+    for (const s of segs) {
+      if (Math.abs(s.x - x) < cHW + sH && Math.abs(s.y - y) < cHH + sH) {
+        gameOver();
+        break;
+      }
+    }
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function gameOver() {
+  state = 'over';
+  const rec = elapsed.toFixed(1);
+  if (bestTime === null || elapsed > bestTime) {
+    bestTime = elapsed;
+    bestEl.textContent = bestTime.toFixed(1) + '초';
+  }
+  ovTitle.innerHTML =
+    '<div class="result">💥 게임 오버!</div>' +
+    '<div style="margin-top:6px">생존 기록: ' + rec + '초</div>' +
+    '<div style="margin-top:10px;font-size:15px">▶ 탭해서 다시 시작</div>';
+  overlay.classList.remove('hidden');
+}
+
+// ---------- 시작/재시작 & 포커스 ----------
+function grabFocus() {
+  window.focus();
+  canvas.focus({ preventScroll: true });
+}
+overlay.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  overlay.classList.add('hidden');
+  resetGame();
+  lastFrame = null;   // dt 기준점 초기화
+  state = 'playing';
+  grabFocus();
+});
+document.addEventListener('pointerdown', grabFocus);
+window.addEventListener('blur', () => setTimeout(grabFocus, 50));
+
+// ---------- 키보드 ----------
+const keyMap = { ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right' };
+function onKeyDown(e) { if (keyMap[e.key]) { pressed[keyMap[e.key]] = true; e.preventDefault(); } }
+function onKeyUp(e)   { if (keyMap[e.key]) { pressed[keyMap[e.key]] = false; e.preventDefault(); } }
+for (const tgt of [window, document, canvas]) {
+  tgt.addEventListener('keydown', onKeyDown);
+  tgt.addEventListener('keyup', onKeyUp);
+}
+
+// ---------- 터치 버튼 ----------
+['up','down','left','right'].forEach(dir => {
+  const btn = document.getElementById(dir);
+  const start = e => { pressed[dir] = true; e.preventDefault(); grabFocus(); };
+  const stop  = e => { pressed[dir] = false; e.preventDefault(); };
+  btn.addEventListener('pointerdown', start);
+  btn.addEventListener('pointerup', stop);
+  btn.addEventListener('pointerleave', stop);
+  btn.addEventListener('pointercancel', stop);
+});
+</script>
+</body>
+</html>
