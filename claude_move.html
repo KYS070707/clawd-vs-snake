@@ -90,7 +90,7 @@
 </style>
 </head>
 <body>
-<h1>* Clawd vs Snake (Ver. 1.00)</h1>
+<h1>* Clawd vs Snake (Ver. 1.01)</h1>
 <div id="hud">
   <span>생존: <b id="time">0.0</b>초</span>
   <span class="best">최고 기록: <b id="best">-</b></span>
@@ -514,6 +514,16 @@ for (const tgt of [window, document, canvas]) {
   tgt.addEventListener('keydown', onKeyDown);
   tgt.addEventListener('keyup', onKeyUp);
 }
+
+// ---------- 시작 시 최고 기록 불러오기(수파베이스 TOP 1) ----------
+async function loadBest() {
+  const lb = await getLB();
+  if (lb.length) {
+    bestTime = Number(lb[0].time);
+    bestEl.textContent = bestTime.toFixed(1) + '초';
+  }
+}
+loadBest();
 
 // ---------- 터치 버튼 ----------
 ['up','down','left','right'].forEach(dir => {
