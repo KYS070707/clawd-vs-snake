@@ -98,16 +98,16 @@
 <div class="stage">
   <canvas id="game" width="600" height="400" tabindex="0"></canvas>
   <div id="overlay">
-    <div id="ovTitle">▶ 탭해서 시작</div>
+    <div id="ovTitle">▶ 클릭하거나 스페이스바를 눌러 시작</div>
     <small id="ovDesc">뱀을 피해 최대한 오래 생존하세요!<br>
     10초마다 과일이 생기고, 뱀이 먹으면 1.5배 길어집니다.<br>
-    이동: 방향키 · 버튼</small>
+    이동: 방향키 · 버튼 · 시작: 클릭/스페이스바</small>
     <div id="ovLb"></div>
     <div id="ovForm">
       <input id="ovName" type="text" placeholder="이름 (최대 10자)" maxlength="10">
       <button id="ovSave">저장</button>
     </div>
-    <button id="ovRestart">▶ 다시 시작</button>
+    <button id="ovRestart">▶ 다시 시작 (스페이스바)</button>
   </div>
 </div>
 
@@ -498,13 +498,24 @@ function startPlay() {
   grabFocus();
 }
 overlay.addEventListener('pointerdown', e => {
-  if (overlayMode !== 'ready') return;   // 게임오버 화면에선 '다시 시작' 버튼으로만 재시작
+  if (overlayMode !== 'ready') return;   // 게임오버 화면에선 버튼/스페이스바로만 재시작
   e.preventDefault();
   overlayMode = 'over';                   // 이후부터는 게임오버 화면 규칙 적용
   startPlay();
 });
 document.addEventListener('pointerdown', grabFocus);
 window.addEventListener('blur', () => setTimeout(grabFocus, 50));
+document.addEventListener('keydown', e => {
+  if (e.code !== 'Space') return;
+  if (state === 'ready' && overlayMode === 'ready') {
+    e.preventDefault();
+    overlayMode = 'over';
+    startPlay();
+  } else if (state === 'over' && document.activeElement !== ovName) {
+    e.preventDefault();
+    startPlay();
+  }
+});
 
 // ---------- 키보드 ----------
 const keyMap = { ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right' };
